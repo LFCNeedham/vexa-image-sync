@@ -51,6 +51,9 @@ jobs:
           - source: minio/mc:latest
             target: minio-mc-latest
 
+          - source: ghcr.io/joinly-ai/joinly:latest
+            target: joinly-latest
+
     steps:
       - name: Login to Aliyun ACR
         run: |
