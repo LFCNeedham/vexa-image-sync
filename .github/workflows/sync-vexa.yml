@@ -1,4 +1,4 @@
-name: Sync Vexa Image to Aliyun ACR
+name: Sync All Vexa Images to Aliyun ACR
 
 on:
   workflow_dispatch:
@@ -6,6 +6,50 @@ on:
 jobs:
   sync:
     runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        include:
+          - source: vexaai/v012-admin-api:v0.12.26
+            target: v012-admin-api-v0.12.26
+
+          - source: vexaai/v012-runtime:v0.12.26
+            target: v012-runtime-v0.12.26
+
+          - source: vexaai/v012-agent-worker:v0.12.26
+            target: v012-agent-worker-v0.12.26
+
+          - source: vexaai/v012-agent-api:v0.12.26
+            target: v012-agent-api-v0.12.26
+
+          - source: vexaai/v012-meeting-api:v0.12.26
+            target: v012-meeting-api-v0.12.26
+
+          - source: vexaai/v012-gateway:v0.12.26
+            target: v012-gateway-v0.12.26
+
+          - source: vexaai/v012-mcp:v0.12.26
+            target: v012-mcp-v0.12.26
+
+          - source: vexaai/v012-terminal:v0.12.26
+            target: v012-terminal-v0.12.26
+
+          - source: vexaai/vexa-bot:v0.12.26
+            target: vexa-bot-v0.12.26
+
+          - source: valkey/valkey:8-alpine
+            target: valkey-8-alpine
+
+          - source: postgres:17-alpine
+            target: postgres-17-alpine
+
+          - source: minio/minio:latest
+            target: minio-latest
+
+          - source: minio/mc:latest
+            target: minio-mc-latest
 
     steps:
       - name: Login to Aliyun ACR
@@ -15,17 +59,17 @@ jobs:
             --username "${{ secrets.ACR_USERNAME }}" \
             --password-stdin
 
-      - name: Pull Vexa gateway from Docker Hub
+      - name: Pull from Docker Hub
         run: |
-          docker pull vexaai/v012-gateway:v0.12.26
+          docker pull --platform linux/amd64 "${{ matrix.source }}"
 
-      - name: Tag image
+      - name: Tag for Aliyun ACR
         run: |
           docker tag \
-            vexaai/v012-gateway:v0.12.26 \
-            "${{ secrets.ACR_REGISTRY }}/needham1107/needham1107:v012-gateway-v0.12.26"
+            "${{ matrix.source }}" \
+            "${{ secrets.ACR_REGISTRY }}/needham1107/needham1107:${{ matrix.target }}"
 
-      - name: Push image to Aliyun ACR
+      - name: Push to Aliyun ACR
         run: |
           docker push \
-            "${{ secrets.ACR_REGISTRY }}/needham1107/needham1107:v012-gateway-v0.12.26"
+            "${{ secrets.ACR_REGISTRY }}/needham1107/needham1107:${{ matrix.target }}"
