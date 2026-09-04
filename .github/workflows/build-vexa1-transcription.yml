@@ -1,0 +1,76 @@
+name: Build Vexa CPU Transcription Tiny to Aliyun ACR
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Vexa v0.12.26
+        uses: actions/checkout@v4
+        with:
+          repository: Vexa-ai/vexa
+          ref: v0.12.26
+
+      - name: Login to Aliyun ACR
+        run: |
+          echo "${{ secrets.ACR_PASSWORD }}" | \
+          docker login "${{ secrets.ACR_REGISTRY }}" \
+            --username "${{ secrets.ACR_USERNAME }}" \
+            --password-stdin
+
+      - name: Build original Vexa CPU transcription
+        run: |
+          DOCKER_BUILDKIT=1 docker build \
+            --platform linux/amd64 \
+            -f core/meetings/services/transcription/Dockerfile.cpu \
+            -t vexa-transcription-base:v0.12.26 \
+            .
+
+      - name: Create tiny preloaded image
+        run: |
+          cat > /tmp/Dockerfile.transcription-tiny <<'EOF'
+          FROM vexa-transcription-base:v0.12.26
+
+          RUN python - <<'PY'
+          from faster_whisper import WhisperModel
+
+          print("Downloading faster-whisper tiny model...")
+
+          model = WhisperModel(
+              "tiny",
+              device="cpu",
+              compute_type="int8",
+              download_root="/app/models"
+          )
+
+          print("tiny model downloaded and loaded successfully")
+          PY
+          EOF
+
+          docker build \
+            --platform linux/amd64 \
+            -f /tmp/Dockerfile.transcription-tiny \
+            -t "${{ secrets.ACR_REGISTRY }}/needham1107/needham1107:v012-transcription-cpu-tiny-v0.12.26" \
+            .
+
+      - name: Verify model exists in image
+        run: |
+          docker run --rm \
+            --entrypoint sh \
+            "${{ secrets.ACR_REGISTRY }}/needham1107/needham1107:v012-transcription-cpu-tiny-v0.12.26" \
+            -lc '
+              echo "=== /app/models ==="
+              du -sh /app/models
+              find /app/models -maxdepth 4 -type f | head -30
+            '
+
+      - name: Push preloaded transcription image
+        run: |
+          docker push \
+            "${{ secrets.ACR_REGISTRY }}/needham1107/needham1107:v012-transcription-cpu-tiny-v0.12.26"
