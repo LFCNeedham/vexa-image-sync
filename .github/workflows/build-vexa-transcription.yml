@@ -1,0 +1,49 @@
+name: Build Vexa CPU Transcription to Aliyun ACR
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Vexa v0.12.26
+        uses: actions/checkout@v4
+        with:
+          repository: Vexa-ai/vexa
+          ref: v0.12.26
+
+      - name: Login to Aliyun ACR
+        run: |
+          echo "${{ secrets.ACR_PASSWORD }}" | \
+          docker login "${{ secrets.ACR_REGISTRY }}" \
+            --username "${{ secrets.ACR_USERNAME }}" \
+            --password-stdin
+
+      - name: Build CPU transcription image
+        env:
+          TARGET: ${{ secrets.ACR_REGISTRY }}/needham1107/needham1107:v012-transcription-cpu-v0.12.26
+        run: |
+          DOCKER_BUILDKIT=1 docker build \
+            --platform linux/amd64 \
+            -f core/meetings/services/transcription/Dockerfile.cpu \
+            -t "$TARGET" \
+            .
+
+      - name: Push CPU transcription image
+        env:
+          TARGET: ${{ secrets.ACR_REGISTRY }}/needham1107/needham1107:v012-transcription-cpu-v0.12.26
+        run: |
+          docker push "$TARGET"
+
+      - name: Mirror nginx alpine image
+        env:
+          TARGET: ${{ secrets.ACR_REGISTRY }}/needham1107/needham1107:nginx-alpine
+        run: |
+          docker pull --platform linux/amd64 nginx:alpine
+          docker tag nginx:alpine "$TARGET"
+          docker push "$TARGET"
