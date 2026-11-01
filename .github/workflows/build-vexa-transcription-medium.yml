@@ -1,0 +1,126 @@
+name: Build Vexa CPU Transcription Medium to Aliyun ACR
+
+# Medium-model variant of the transcription image build: same pipeline as
+# build-vexa1-transcription.yml, but the preloaded Whisper model is "medium"
+# (Systran/faster-whisper-medium, ~1.5 GB model.bin) instead of "tiny".
+#
+# Speed notes (huggingface-hub 1.21.0 + hf-xet 1.5.1 are locked in
+# core/meetings/services/transcription/uv.lock at tag v0.12.26):
+#   - HF_XET_HIGH_PERFORMANCE=1 switches hf_xet to concurrent chunked download,
+#     the fastest supported path for the big model.bin on this dependency set.
+#   - HF_HUB_ENABLE_HF_TRANSFER must NOT be set: hub 1.x removed hf_transfer
+#     support and hf-transfer is not in the lockfile.
+#   - The image bakes MODEL_SIZE=/app/models so a pulled container serves the
+#     preloaded model straight from disk - runtime needs no huggingface.co
+#     access (override MODEL_SIZE in the deployment env to change models).
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-vexa-transcription-medium
+  cancel-in-progress: false
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout Vexa v0.12.26
+        uses: actions/checkout@v4
+        with:
+          repository: Vexa-ai/vexa
+          ref: v0.12.26
+          persist-credentials: false
+
+      - name: Login to Aliyun ACR
+        run: |
+          echo "${{ secrets.ACR_PASSWORD }}" | \
+          docker login "${{ secrets.ACR_REGISTRY }}" \
+            --username "${{ secrets.ACR_USERNAME }}" \
+            --password-stdin
+
+      - name: Build original Vexa CPU transcription
+        run: |
+          DOCKER_BUILDKIT=1 docker build \
+            --platform linux/amd64 \
+            -f core/meetings/services/transcription/Dockerfile.cpu \
+            -t vexa-transcription-base:v0.12.26 \
+            .
+
+      - name: Create medium preloaded image
+        run: |
+          cat > /tmp/Dockerfile.transcription-medium <<'EOF'
+          # syntax=docker/dockerfile:1
+          FROM vexa-transcription-base:v0.12.26
+
+          ENV HF_XET_HIGH_PERFORMANCE=1 \
+              HF_HUB_DISABLE_TELEMETRY=1 \
+              HF_HUB_DISABLE_PROGRESS_BARS=1 \
+              MODEL_SIZE=/app/models
+
+          RUN python - <<'PY'
+          from faster_whisper import WhisperModel
+
+          print("Downloading faster-whisper medium model (Systran/faster-whisper-medium)...")
+
+          model = WhisperModel(
+              "medium",
+              device="cpu",
+              compute_type="int8",
+              download_root="/app/models"
+          )
+
+          print("medium model downloaded and loaded successfully")
+          PY
+          EOF
+
+          DOCKER_BUILDKIT=1 docker build \
+            --platform linux/amd64 \
+            -f /tmp/Dockerfile.transcription-medium \
+            -t "${{ secrets.ACR_REGISTRY }}/needham1107/needham1107:v012-transcription-cpu-medium-v0.12.26" \
+            .
+
+      - name: Verify model exists in image
+        run: |
+          docker run --rm \
+            --entrypoint sh \
+            "${{ secrets.ACR_REGISTRY }}/needham1107/needham1107:v012-transcription-cpu-medium-v0.12.26" \
+            -lc '
+              echo "=== /app/models ==="
+              du -sh /app/models
+              find /app/models -maxdepth 2 -type f
+              test -s /app/models/model.bin || { echo "FATAL: /app/models/model.bin missing"; exit 1; }
+              SIZE_MB=$(du -sm /app/models | cut -f1)
+              echo "total size MB: ${SIZE_MB}"
+              test "${SIZE_MB}" -ge 1400 || { echo "FATAL: /app/models much smaller than medium (~1530 MB expected)"; exit 1; }
+            '
+
+      - name: Verify offline model load (no network)
+        run: |
+          cat > /tmp/verify_medium_load.py <<'EOF'
+          from faster_whisper import WhisperModel
+
+          model = WhisperModel(
+              "/app/models",
+              device="cpu",
+              compute_type="int8"
+          )
+
+          print("OFFLINE LOAD OK - medium model loads from /app/models with no network")
+          EOF
+
+          docker run --rm \
+            --network none \
+            -v /tmp/verify_medium_load.py:/tmp/verify_medium_load.py:ro \
+            --entrypoint python \
+            "${{ secrets.ACR_REGISTRY }}/needham1107/needham1107:v012-transcription-cpu-medium-v0.12.26" \
+            /tmp/verify_medium_load.py
+
+      - name: Push preloaded transcription image
+        run: |
+          docker push \
+            "${{ secrets.ACR_REGISTRY }}/needham1107/needham1107:v012-transcription-cpu-medium-v0.12.26"
