@@ -10,9 +10,8 @@ name: Build Vexa CPU Transcription Medium to Aliyun ACR
 #     the fastest supported path for the big model.bin on this dependency set.
 #   - HF_HUB_ENABLE_HF_TRANSFER must NOT be set: hub 1.x removed hf_transfer
 #     support and hf-transfer is not in the lockfile.
-#   - The image bakes MODEL_SIZE=/app/models so a pulled container serves the
-#     preloaded model straight from disk - runtime needs no huggingface.co
-#     access (override MODEL_SIZE in the deployment env to change models).
+#   - Download into /app/models as a local directory (not the Hub cache layout),
+#     then set MODEL_SIZE=/app/models so runtime loads it without Hub access.
 on:
   workflow_dispatch:
 
@@ -22,6 +21,9 @@ permissions:
 concurrency:
   group: build-vexa-transcription-medium
   cancel-in-progress: false
+
+env:
+  TARGET_IMAGE: ${{ secrets.ACR_REGISTRY }}/needham1107/needham1107:v012-transcription-cpu-medium-v0.12.26
 
 jobs:
   build-and-push:
@@ -37,10 +39,17 @@ jobs:
           persist-credentials: false
 
       - name: Login to Aliyun ACR
+        env:
+          ACR_REGISTRY: ${{ secrets.ACR_REGISTRY }}
+          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
         run: |
-          echo "${{ secrets.ACR_PASSWORD }}" | \
-          docker login "${{ secrets.ACR_REGISTRY }}" \
-            --username "${{ secrets.ACR_USERNAME }}" \
+          : "${ACR_REGISTRY:?ACR_REGISTRY secret is required}"
+          : "${ACR_USERNAME:?ACR_USERNAME secret is required}"
+          : "${ACR_PASSWORD:?ACR_PASSWORD secret is required}"
+          printf '%s' "$ACR_PASSWORD" | \
+          docker login "$ACR_REGISTRY" \
+            --username "$ACR_USERNAME" \
             --password-stdin
 
       - name: Build original Vexa CPU transcription
@@ -53,7 +62,7 @@ jobs:
 
       - name: Create medium preloaded image
         run: |
-          cat > /tmp/Dockerfile.transcription-medium <<'EOF'
+          cat > Dockerfile.transcription-medium <<'EOF'
           # syntax=docker/dockerfile:1
           FROM vexa-transcription-base:v0.12.26
 
@@ -63,32 +72,37 @@ jobs:
               MODEL_SIZE=/app/models
 
           RUN python - <<'PY'
-          from faster_whisper import WhisperModel
+          from huggingface_hub import snapshot_download
 
           print("Downloading faster-whisper medium model (Systran/faster-whisper-medium)...")
 
-          model = WhisperModel(
-              "medium",
-              device="cpu",
-              compute_type="int8",
-              download_root="/app/models"
+          model_path = snapshot_download(
+              repo_id="Systran/faster-whisper-medium",
+              local_dir="/app/models",
+              allow_patterns=[
+                "config.json",
+                "preprocessor_config.json",
+                "model.bin",
+                "tokenizer.json",
+                "vocabulary.*",
+              ],
           )
 
-          print("medium model downloaded and loaded successfully")
+          print(f"medium model downloaded to {model_path}")
           PY
           EOF
 
           DOCKER_BUILDKIT=1 docker build \
             --platform linux/amd64 \
-            -f /tmp/Dockerfile.transcription-medium \
-            -t "${{ secrets.ACR_REGISTRY }}/needham1107/needham1107:v012-transcription-cpu-medium-v0.12.26" \
+            -f Dockerfile.transcription-medium \
+            -t "$TARGET_IMAGE" \
             .
 
       - name: Verify model exists in image
         run: |
           docker run --rm \
             --entrypoint sh \
-            "${{ secrets.ACR_REGISTRY }}/needham1107/needham1107:v012-transcription-cpu-medium-v0.12.26" \
+            "$TARGET_IMAGE" \
             -lc '
               echo "=== /app/models ==="
               du -sh /app/models
@@ -116,11 +130,12 @@ jobs:
           docker run --rm \
             --network none \
             -v /tmp/verify_medium_load.py:/tmp/verify_medium_load.py:ro \
+            -e HF_HUB_OFFLINE=1 \
             --entrypoint python \
-            "${{ secrets.ACR_REGISTRY }}/needham1107/needham1107:v012-transcription-cpu-medium-v0.12.26" \
+            "$TARGET_IMAGE" \
             /tmp/verify_medium_load.py
 
       - name: Push preloaded transcription image
         run: |
           docker push \
-            "${{ secrets.ACR_REGISTRY }}/needham1107/needham1107:v012-transcription-cpu-medium-v0.12.26"
+            "$TARGET_IMAGE"
